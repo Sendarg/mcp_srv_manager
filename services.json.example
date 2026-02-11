@@ -1,0 +1,12 @@
+{
+  "services": [
+    {
+      "name": "Example Service",
+      "command": "python -m http.server 8080"
+    },
+    {
+      "name": "Talkito",
+      "command": "talkito --mcp-server --port=8000"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+build/
+dist/
+*.pyc
+__pycache__/
+.DS_Store
+*.log
+.venv/
+env/
+services.json
+icon.png
+icon.icns
