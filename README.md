@@ -11,7 +11,6 @@ A lightweight macOS GUI for managing background services and MCP servers.
 - Live port detection for running processes
 - Port conflict detection with one-click kill
 - Duplicate process detection
-- Inline command editing with undo/redo
 - Auto-detects shell environment (Homebrew, Conda, etc.)
 - Dark theme UI built with CustomTkinter
 
