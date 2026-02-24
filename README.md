@@ -1,55 +1,47 @@
 # MCP Service Manager
 
-A sleek, lightweight GUI tool for managing background services and MCP servers on macOS.
+A lightweight macOS GUI for managing background services and MCP servers.
 
 ![Screenshot](screenshot.png)
 
 ## Features
 
--   **Process Control**: Start, Stop, and Restart services with a single click.
--   **Real-time Monitoring**: Visual status indicators (Running/Stopped) and PID tracking.
--   **Smart Conflict Detection**: 
-    -   **Port Conflicts**: Warns if a port (e.g., 8000) is already occupied.
-    -   **Duplicate Checks**: Prevents running multiple instances of the same service.
--   **Kill Switch**: Force-kill conflicting processes directly from the UI.
--   **Zero-Config**: Automatically detects environment paths (Conda/Homebrew).
+- Start / Stop / Restart services with one click
+- Real-time status indicators and PID tracking
+- Live port detection for running processes
+- Port conflict detection with one-click kill
+- Duplicate process detection
+- Inline command editing with undo/redo
+- Auto-detects shell environment (Homebrew, Conda, etc.)
+- Dark theme UI built with CustomTkinter
 
-## Installation
+## Requirements
 
-### Prerequisites
--   Python 3.10+ (Recommended: Miniconda or venv)
--   macOS (tested on Sequoia)
+- Python 3.10+
+- macOS (tested on Sequoia)
 
-### Setup
-1.  **Clone the repository**
-    ```bash
-    git clone <your-repo-url>
-    cd mcp_srv_manager
-    ```
+## Quick Start
 
-2.  **Install Dependencies**
-    ```bash
-    pip install customtkinter Pillow packaging py2app
-    ```
-
-## Usage
-
-### Run Directly
 ```bash
+git clone https://github.com/Sendarg/mcp_srv_manager.git
+cd mcp_srv_manager
+pip install -r requirements.txt
 python main.py
 ```
 
-### Build Standalone App
-Generate a lightweight macOS application (`.app`):
+## Build macOS App
+
 ```bash
 python build_app.py
 ```
-> **Note**: This builds in **Alias Mode**, creating a tiny application (<1MB) that uses your system's Python environment. The app will be located in `dist/Service Manager.app`.
+
+Builds in alias mode — creates a small `.app` bundle in `dist/` that uses your system Python.
 
 ## Configuration
 
-Services can be added via the GUI or manually edited in `services.json`. 
-A template is provided in `services.json.example`.
+Add services via the GUI, or edit `services.json` directly.  
+See `services.json.example` for the format.
 
 ## License
+
 MIT

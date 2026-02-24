@@ -18,18 +18,20 @@ from pathlib import Path
 # Ensure environment is set up correctly
 
 try:
+    # Always load user's login shell PATH — not just when frozen.
+    # When launched from an IDE, os.environ["PATH"] may point to a
+    # different node/yarn than the user's terminal.
+    try:
+        _user_path = subprocess.check_output(
+            ["/bin/zsh", "-l", "-c", "echo $PATH"],
+            text=True, timeout=5
+        ).strip()
+        if _user_path:
+            os.environ["PATH"] = _user_path
+    except Exception:
+        pass
+
     if getattr(sys, "frozen", False):
-        # FIX: Load User's Shell PATH
-        try:
-            # Use zsh login shell to get the real PATH
-            user_path = subprocess.check_output(
-                ["/bin/zsh", "-l", "-c", "echo $PATH"], 
-                text=True
-            ).strip()
-            os.environ["PATH"] = user_path
-        except Exception:
-            pass
-            
         # Append current python bin and common paths
         current_py_bin = os.path.dirname(sys.executable)
         common_paths = [
@@ -47,9 +49,6 @@ try:
 
 except Exception:
     pass
-
-except Exception:
-    pass  # Worst case: silent fail, but don't crash the import
 
 
 
@@ -79,9 +78,12 @@ SHELL_ENV = os.environ.copy()
 for key in ["PYTHONPATH", "PYTHONHOME", "DYLD_LIBRARY_PATH"]:
     SHELL_ENV.pop(key, None)
 
-# Add common paths to PATH in SHELL_ENV just in case
-# (Previous fix updated os.environ, so SHELL_ENV.copy() should have it, but consistent ordering helps)
-SHELL_ENV["PATH"] = os.environ.get("PATH", "/usr/bin:/bin")
+# Ensure /opt/homebrew/bin is at the front of PATH so homebrew tools
+# (node, yarn, etc.) take priority over /usr/local/bin versions.
+_path = os.environ.get("PATH", "/usr/bin:/bin")
+if "/opt/homebrew/bin" not in _path.split(":")[0:3]:
+    _path = f"/opt/homebrew/bin:{_path}"
+SHELL_ENV["PATH"] = _path
 
 def _get_resource_path(relative_path: str) -> Path:
     """Get absolute path to resource, works for dev and for PyInstaller/py2app."""
@@ -249,37 +251,46 @@ class ServiceManager:
 
         try:
             import tempfile
-            shell = os.environ.get("SHELL", "/bin/zsh")
-            escaped_cmd = svc["command"].replace("'", "'\\''")
-            wrapped_cmd = f"{shell} -l -c '{escaped_cmd}'"
 
             # Capture stderr to a temp file for error diagnostics
             stderr_file = tempfile.NamedTemporaryFile(
                 mode='w+', suffix='.err', delete=False, prefix='svcmgr_'
             )
+            stdout_file = tempfile.NamedTemporaryFile(
+                mode='w+', suffix='.out', delete=False, prefix='svcmgr_'
+            )
+            # Run command directly with shell=True. SHELL_ENV already has
+            # the correct PATH from login shell probe at startup.
+            # Do NOT wrap in "zsh -l -c" — login shell runs path_helper
+            # which reorders PATH and puts /usr/local/bin before /opt/homebrew/bin.
             proc = subprocess.Popen(
-                wrapped_cmd,
+                svc["command"],
                 shell=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
+                stdout=stdout_file,
                 stderr=stderr_file,
                 env=SHELL_ENV,
                 preexec_fn=os.setsid if sys.platform != "win32" else None,
             )
             time.sleep(0.8)
             if proc.poll() is not None:
-                # Read captured stderr
+                # Read captured stderr and stdout
                 stderr_file.seek(0)
-                stderr_out = stderr_file.read().strip()[:200]
+                stderr_out = stderr_file.read().strip()[-300:]
                 stderr_file.close()
+                stdout_file.seek(0)
+                stdout_out = stdout_file.read().strip()[-300:]
+                stdout_file.close()
                 try:
                     os.unlink(stderr_file.name)
+                    os.unlink(stdout_file.name)
                 except Exception:
                     pass
 
                 err_msg = f"Exit code {proc.returncode}"
-                if stderr_out:
-                    err_msg += f" — {stderr_out}"
+                combined = (stderr_out + " " + stdout_out).strip()
+                if combined:
+                    err_msg += f" — {combined[:300]}"
                 if port:
                     blocker = self._check_port_conflict(port)
                     if blocker:
@@ -291,8 +302,10 @@ class ServiceManager:
                 self.errors[name] = err_msg
                 return False
             stderr_file.close()
+            stdout_file.close()
             try:
                 os.unlink(stderr_file.name)
+                os.unlink(stdout_file.name)
             except Exception:
                 pass
 
@@ -345,6 +358,8 @@ class ServiceManager:
         if proc is None:
             return False
         if proc.poll() is not None:
+            if name not in self.errors:
+                self.errors[name] = f"Process exited with code {proc.returncode}"
             self.processes.pop(name, None)
             return False
         return True
@@ -357,6 +372,43 @@ class ServiceManager:
 
     def get_error(self, name: str) -> str | None:
         return self.errors.get(name)
+    def get_ports(self, name: str) -> list[int]:
+        """Detect actual listening ports from the process and all descendants."""
+        pid = self.get_pid(name)
+        if not pid:
+            return []
+        ports = set()
+        try:
+            # Use process group (we start with setsid) to find ALL descendants
+            pids = {str(pid)}
+            try:
+                pgid = os.getpgid(pid)
+                out = subprocess.check_output(
+                    ["pgrep", "-g", str(pgid)],
+                    stderr=subprocess.DEVNULL, timeout=2
+                ).decode()
+                for line in out.strip().splitlines():
+                    if line.strip().isdigit():
+                        pids.add(line.strip())
+            except Exception:
+                pass
+            # Query lsof for all PIDs at once
+            pid_list = ",".join(pids)
+            try:
+                out = subprocess.check_output(
+                    ["lsof", "-aPi", "-sTCP:LISTEN", "-p", pid_list, "-Fn"],
+                    stderr=subprocess.DEVNULL, timeout=2
+                ).decode()
+                for line in out.splitlines():
+                    if line.startswith("n") and ":" in line:
+                        port_str = line.rsplit(":", 1)[-1]
+                        if port_str.isdigit():
+                            ports.add(int(port_str))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return sorted(ports)
 
     def _find(self, name: str) -> dict | None:
         for svc in self.services:
@@ -442,11 +494,48 @@ class App(ctk.CTk):
         )
         self.entry_cmd.grid(row=0, column=1, padx=4, pady=10, sticky="ew")
 
+        self._bind_undo_redo(self.entry_name)
+        self._bind_undo_redo(self.entry_cmd)
+
         ctk.CTkButton(
             add_frame, text="+ Add", width=64, height=30, corner_radius=8,
             fg_color="#7c3aed", hover_color="#6d28d9",
             font=("Arial", 13, "bold"), command=self._on_add
         ).grid(row=0, column=2, padx=(6, 12), pady=10)
+    @staticmethod
+    def _bind_undo_redo(ctk_entry, initial=""):
+        """Attach undo/redo support to a CTkEntry widget."""
+        inner = ctk_entry._entry
+        undo_stack = [initial]
+        redo_stack = []
+
+        def snapshot(e=None):
+            cur = inner.get()
+            if not undo_stack or undo_stack[-1] != cur:
+                undo_stack.append(cur)
+                redo_stack.clear()
+
+        def undo(e):
+            snapshot()
+            if len(undo_stack) > 1:
+                redo_stack.append(undo_stack.pop())
+                inner.delete(0, "end")
+                inner.insert(0, undo_stack[-1])
+            return "break"
+
+        def redo(e):
+            if redo_stack:
+                val = redo_stack.pop()
+                undo_stack.append(val)
+                inner.delete(0, "end")
+                inner.insert(0, val)
+            return "break"
+
+        inner.bind("<KeyRelease>", snapshot)
+        for mod in ("<Command-z>", "<Meta-z>"):
+            inner.bind(mod, undo)
+        for mod in ("<Command-Shift-z>", "<Command-Z>", "<Meta-Shift-z>", "<Meta-Z>"):
+            inner.bind(mod, redo)
 
     # ---- List management ----
 
@@ -475,8 +564,9 @@ class App(ctk.CTk):
                 name = svc["name"]
                 running = self.mgr.is_running(name)
                 pid = self.mgr.get_pid(name)
+                ports = self.mgr.get_ports(name)
                 error = self.mgr.get_error(name)
-                self._create_row(i, svc, running, pid, error)
+                self._create_row(i, svc, running, pid, ports, error)
         finally:
             self._rebuilding = False
             if self._pending_rebuild:
@@ -484,7 +574,7 @@ class App(ctk.CTk):
                 self.after(50, self._rebuild_list)
 
     def _create_row(self, index: int, svc: dict, running: bool,
-                    pid: int | None, error: str | None):
+                    pid: int | None, ports: list[int], error: str | None):
         """Create one service row frame — vertical container."""
         # Main container for the item
         bg = COLOR_BG_ERR if error else COLOR_BG_CARD
@@ -509,6 +599,14 @@ class App(ctk.CTk):
             text_color=pid_color, width=44, anchor="e"
         ).pack(side="left", padx=(0, 2), pady=6)
 
+        # Port(s)
+        if running and ports:
+            port_text = " ".join(f":{p}" for p in ports)
+            ctk.CTkLabel(
+                top_row, text=port_text, font=("Menlo", 9),
+                text_color=COLOR_RUNNING, anchor="w"
+            ).pack(side="left", padx=(0, 2), pady=6)
+
         # Name
         ctk.CTkLabel(
             top_row, text=svc["name"], font=("Arial", 12, "bold"),
@@ -523,6 +621,10 @@ class App(ctk.CTk):
         cmd_entry.insert(0, svc["command"])
         cmd_entry.bind("<FocusOut>", lambda e, i=index: self._on_cmd_change(i, cmd_entry.get()))
         cmd_entry.bind("<Return>", lambda e: self.focus())
+
+        # Undo/Redo support
+        self._bind_undo_redo(cmd_entry, svc["command"])
+
         cmd_entry.pack(side="left", fill="x", expand=True, padx=8)
 
         # Controls
@@ -629,6 +731,8 @@ class App(ctk.CTk):
     def _do_action(self, fn, name: str):
         fn(name)
         self.after(100, self._rebuild_list)
+        # Delayed refresh to pick up port info after process binds
+        self.after(1000, self._rebuild_list)
 
     def _on_delete(self, index: int):
         if 0 <= index < len(self.mgr.services):
